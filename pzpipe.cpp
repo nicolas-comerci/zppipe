@@ -14,7 +14,7 @@
 
 // version information
 #define V_MAJOR 0
-#define V_MINOR 1
+#define V_MINOR 2
 static constexpr char V_MINOR2 = 'a';
 //#define V_STATE "ALPHA"
 #define V_STATE "DEVELOPMENT"
