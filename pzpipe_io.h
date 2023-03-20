@@ -24,9 +24,9 @@ class ZpaqIStreamBuffer : public std::streambuf
     long long curr_read_slot = 0;
     long long eof_slot = -1;
 
-    ZpaqIStreamBufReader(std::istream* wrapped_istream) : streambuf_wrapped_istream(wrapped_istream) {}
+    explicit ZpaqIStreamBufReader(std::istream* wrapped_istream) : streambuf_wrapped_istream(wrapped_istream) {}
 
-    ZpaqIStreamBufReader(std::vector<char>&& otf_in)
+    explicit ZpaqIStreamBufReader(std::vector<char>&& otf_in)
       : otf_in(std::move(otf_in)), streambuf_wrapped_istream(nullptr), eof_slot(this->otf_in.size()) {}
 
     // Using this indirect way of getting pointers to the vector using slot to ensure we don't have problems after memory reallocations
@@ -94,7 +94,7 @@ class ZpaqIStreamBuffer : public std::streambuf
     std::unique_ptr<char[]>* dec_buf;
     char* curr_write = nullptr;
 
-    ZpaqIStreamBufWriter(std::unique_ptr<char[]>* otf_dec) : dec_buf(otf_dec) {}
+    explicit ZpaqIStreamBufWriter(std::unique_ptr<char[]>* otf_dec) : dec_buf(otf_dec) {}
 
     void put(int c) override {
       if (curr_write == nullptr) reset_write_ptr();
@@ -113,7 +113,7 @@ class ZpaqIStreamBuffer : public std::streambuf
     ZpaqIStreamBufWriter writer;
     std::thread decompression_thread;
 
-    ZpaqIStreamBlockManager(std::vector<char>&& otf_in)
+    explicit ZpaqIStreamBlockManager(std::vector<char>&& otf_in)
       : reader(std::move(otf_in)), dec_buf(std::make_unique<char[]>(CHUNK * 10)), writer(&this->dec_buf) {}
 
     void decompress_on_thread()
@@ -225,7 +225,7 @@ public:
   std::unique_ptr<char[]> otf_in;
   std::unique_ptr<char[]> otf_out;
 
-  CompressedOStreamBuffer(std::unique_ptr<std::ostream>&& wrapped_ostream): wrapped_ostream(std::move(wrapped_ostream))
+  explicit CompressedOStreamBuffer(std::unique_ptr<std::ostream>&& wrapped_ostream): wrapped_ostream(std::move(wrapped_ostream))
   {
     otf_in = std::make_unique<char[]>(CHUNK);
     otf_out = std::make_unique<char[]>(CHUNK);
@@ -237,10 +237,6 @@ public:
 
   void set_stream_eof() {
     if (is_stream_eof) return;
-    // uncompressed data of length 0 ends compress-on-the-fly data
-    for (int i = 0; i < 9; i++) {
-      overflow(0);
-    }
     sync(true);
     is_stream_eof = true;
   }
@@ -270,7 +266,7 @@ class ZpaqOStreamBuffer : public CompressedOStreamBuffer
     char* curr_read = nullptr;
     char* data_end;
 
-    ZpaqOStreamBufReader(std::unique_ptr<char[]>* otf_in) {
+    explicit ZpaqOStreamBufReader(std::unique_ptr<char[]>* otf_in) {
       buffer = std::make_unique<char[]>(CHUNK);
       std::copy_n(otf_in->get(), CHUNK, buffer.get());
       data_end = buffer.get() + CHUNK;
@@ -334,7 +330,7 @@ class ZpaqOStreamBuffer : public CompressedOStreamBuffer
     std::thread compression_thread;
     bool compression_finished = false;
 
-    ZpaqOstreamBlockManager(std::unique_ptr<char[]>* otf_in) : reader(otf_in)
+    explicit ZpaqOstreamBlockManager(std::unique_ptr<char[]>* otf_in) : reader(otf_in)
     {
       compressor.setInput(&reader);
       compressor.setOutput(&writer);

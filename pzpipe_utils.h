@@ -31,7 +31,7 @@ constexpr auto ERR_DONT_USE_SPACE = 10;
 constexpr auto ERR_MORE_THAN_ONE_OUTPUT_FILE = 11;
 constexpr auto ERR_MORE_THAN_ONE_INPUT_FILE = 12;
 constexpr auto ERR_CTRL_C = 13;
-constexpr auto ERR_ONLY_SET_LZMA_THREAD_ONCE = 17;
+constexpr auto ERR_ONLY_SET_ZPAQ_THREAD_ONCE = 17;
 
 void error(int error_nr, std::string tmp_filename = "");
 
@@ -39,6 +39,5 @@ long long get_time_ms();
 
 void print_work_sign(bool with_backspace);
 
-extern int old_lzma_progress_text_length;
-void show_progress(float percent, bool use_backspaces, bool check_time, std::optional<int> lzma_mib_total = std::nullopt, std::optional<int> lzma_mib_written = std::nullopt);
+void show_progress(float percent, bool use_backspaces, bool check_time);
 #endif // PZPIPE_UTILS_H

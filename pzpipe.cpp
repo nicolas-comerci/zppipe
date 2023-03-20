@@ -109,9 +109,6 @@ public:
     float global_max_percent = 100;
 
     // Uncompressed data info
-    long long uncompressed_pos;
-    bool uncompressed_data_in_work;
-    long long uncompressed_length = -1;
     long long uncompressed_bytes_total = 0;
     long long uncompressed_bytes_written = 0;
 };
@@ -126,17 +123,6 @@ int ostream_printf(std::ostream& out, std::string str) {
     if (out.bad()) return 0;
   }
   return str.length();
-}
-
-// istreams don't allow seeking once eof/failbit is set, which happens if we read a file to the end.
-// This behaves more like std::fseek by just clearing the eof and failbit to allow the seek operation to happen.
-void force_seekg(std::istream& stream, long long offset, std::ios_base::seekdir origin) {
-  if (stream.bad()) {
-    print_to_console("Input stream went bad");
-    exit(1);
-  }
-  stream.clear();
-  stream.seekg(offset, origin);
 }
 
 int parseInt(const char*& c, const char* context, int too_big_error_code = 0) {
@@ -241,7 +227,7 @@ int init(int argc, char* argv[]) {
     int i;
 
     print_to_console("\n");
-    print_to_console("PZPipe v%i.%i.%c %s %s - %s version",V_MAJOR,V_MINOR,V_MINOR2,V_OS,V_BIT,V_STATE);
+    print_to_console("PZPipe v%i.%i%c %s %s - %s version",V_MAJOR,V_MINOR,V_MINOR2,V_OS,V_BIT,V_STATE);
     print_to_console(" - %s\n",V_MSG);
     print_to_console("Apache 2.0 License - Copyright 2023 by Nicolas Comerci\n");
     print_to_console("  LibZPAQ by Matt Mahoney (https://mattmahoney.net/dc/zpaq.html)\n\n");
@@ -251,7 +237,7 @@ int init(int argc, char* argv[]) {
     bool output_file_given = false;
     int operation = P_COMPRESS;
     bool parse_on = true;
-    bool lzma_thread_count_set = false;
+    bool zpaq_thread_count_set = false;
 
     for (i = 1; (i < argc) && (parse_on); i++) {
         if (argv[i][0] == '-') { // switch
@@ -267,22 +253,16 @@ int init(int argc, char* argv[]) {
                     parse_on = false;
                     break;
                 }
-                case 'L':
+                case 'T':
                 {
-                    if (toupper(argv[i][2]) == 'T') { // LZMA thread count
-                        if (lzma_thread_count_set) {
-                            error(ERR_ONLY_SET_LZMA_THREAD_ONCE);
-                        }
-                        g_pzpipe.compression_otf_thread_count = std::min<unsigned int>(
-                                parseIntUntilEnd(argv[i] + 3, "LZMA thread count"),
-                                std::thread::hardware_concurrency()
-                        );
-                        lzma_thread_count_set = true;
+                    if (zpaq_thread_count_set) {
+                        error(ERR_ONLY_SET_ZPAQ_THREAD_ONCE);
                     }
-                    else {
-                        print_to_console("ERROR: Unknown switch \"%s\"\n", argv[i]);
-                        exit(1);
-                    }
+                    g_pzpipe.compression_otf_thread_count = std::min<unsigned int>(
+                            parseIntUntilEnd(argv[i] + 2, "ZPAQ thread count"),
+                            std::thread::hardware_concurrency()
+                    );
+                    zpaq_thread_count_set = true;
                     break;
                 }
                 case 'V':
@@ -334,10 +314,6 @@ int init(int argc, char* argv[]) {
             g_pzpipe.input_file_name = argv[i];
 
             if (g_pzpipe.input_file_name == "stdin") {
-                if (operation != P_DECOMPRESS) {
-                    print_to_console("ERROR: Reading from stdin or writing to stdout only supported for recompressing.\n");
-                    exit(1);
-                }
                 // Read binary from stdin
                 SET_BINARY_MODE(STDIN);
                 g_pzpipe.fin->rdbuf(std::cin.rdbuf());
@@ -369,7 +345,7 @@ int init(int argc, char* argv[]) {
         print_to_console("  d            Decompress ZPAQ stream\n");
         print_to_console("  o[filename]  Write output to [filename] <[input_file].zpaq or file in header>\n");
         print_to_console("  e            preserve original extension of input name for output name <off>\n");
-        print_to_console("  lt[count]    Set LZMA thread count <auto-detect: %i>\n", auto_detected_thread_count());
+        print_to_console("  t[count]     Set ZPAQ thread count <auto-detect: %i>\n", auto_detected_thread_count());
         print_to_console("  v            Verbose (debug) mode <off>\n");
 
         exit(1);
@@ -416,71 +392,6 @@ int init(int argc, char* argv[]) {
     return operation;
 }
 
-void start_uncompressed_data(long long input_file_pos) {
-    g_pzpipe.uncompressed_length = 0;
-    g_pzpipe.uncompressed_pos = input_file_pos;
-
-    // uncompressed data
-    g_pzpipe.fout->put(0);
-
-    g_pzpipe.uncompressed_data_in_work = true;
-}
-
-void fout_fput_vlint(unsigned long long v, std::ostream* ostream) {
-    while (v >= 128) {
-        ostream->put((v & 127) + 128);
-        v = (v >> 7) - 1;
-    }
-    ostream->put(v);
-}
-
-void progress_update(long long bytes_written, long long input_file_pos) {
-    float percent = ((input_file_pos + g_pzpipe.uncompressed_bytes_written + bytes_written) / ((float)g_pzpipe.fin_length + g_pzpipe.uncompressed_bytes_total)) * (g_pzpipe.global_max_percent - g_pzpipe.global_min_percent) + g_pzpipe.global_min_percent;
-    show_progress(percent, true, true);
-}
-
-void fast_copy(std::istream& file1, std::ostream& file2, long long bytecount, long long input_file_pos, bool update_progress = false) {
-    if (bytecount == 0) return;
-
-    long long i;
-    constexpr auto COPY_BUF_SIZE = 512;
-    int remaining_bytes = (bytecount % COPY_BUF_SIZE);
-    long long maxi = (bytecount / COPY_BUF_SIZE);
-    unsigned char copybuf[COPY_BUF_SIZE];
-    constexpr auto FAST_COPY_WORK_SIGN_DIST = 64; // update work sign after (FAST_COPY_WORK_SIGN_DIST * COPY_BUF_SIZE) bytes
-
-    for (i = 1; i <= maxi; i++) {
-        file1.read(reinterpret_cast<char*>(copybuf), COPY_BUF_SIZE);
-        file2.write(reinterpret_cast<char*>(copybuf), COPY_BUF_SIZE);
-
-        if (((i - 1) % FAST_COPY_WORK_SIGN_DIST) == 0) {
-            print_work_sign(true);
-            if ((update_progress) && (!DEBUG_MODE)) progress_update(i * COPY_BUF_SIZE, input_file_pos);
-        }
-    }
-    if (remaining_bytes != 0) {
-        file1.read(reinterpret_cast<char*>(copybuf), remaining_bytes);
-        file2.write(reinterpret_cast<char*>(copybuf), remaining_bytes);
-    }
-
-    if ((update_progress) && (!DEBUG_MODE)) g_pzpipe.uncompressed_bytes_written += bytecount;
-}
-
-void end_uncompressed_data(long long input_file_pos) {
-
-    if (!g_pzpipe.uncompressed_data_in_work) return;
-
-    fout_fput_vlint(g_pzpipe.uncompressed_length, g_pzpipe.fout.get());
-
-    // fast copy of uncompressed data
-    force_seekg(*g_pzpipe.fin, g_pzpipe.uncompressed_pos, std::ios_base::beg);
-    fast_copy(*g_pzpipe.fin, *g_pzpipe.fout, g_pzpipe.uncompressed_length, input_file_pos,true);
-
-    g_pzpipe.uncompressed_length = -1;
-
-    g_pzpipe.uncompressed_data_in_work = false;
-}
-
 // nice time output, input t in ms
 // 2^32 ms maximum, so will display incorrect negative values after about 49 days
 void printf_time(long long t) {
@@ -523,6 +434,8 @@ void denit_decompress() {
   printf_time(get_time_ms() - start_time);
 }
 
+static constexpr int COPY_BUF_SIZE = 512;
+
 bool compress_file(float min_percent = 0, float max_percent = 100) {
   write_header();
   g_pzpipe.fout = wrap_ostream_otf_compression(
@@ -533,38 +446,38 @@ bool compress_file(float min_percent = 0, float max_percent = 100) {
   g_pzpipe.global_min_percent = min_percent;
   g_pzpipe.global_max_percent = max_percent;
 
-  g_pzpipe.uncompressed_length = -1;
+  long long uncompressed_length = -1;
+  long long uncompressed_pos = 0;
   g_pzpipe.uncompressed_bytes_total = 0;
   g_pzpipe.uncompressed_bytes_written = 0;
 
-  if (!DEBUG_MODE) show_progress(min_percent, true, false);
+  int bytes_read;
+  unsigned char copybuf[COPY_BUF_SIZE];
 
-  force_seekg(*g_pzpipe.fin, 0, std::ios_base::beg);
+  long long input_file_pos = 0;
 
-  for (long long input_file_pos = 0; input_file_pos < g_pzpipe.fin_length; input_file_pos++) {
-    if (g_pzpipe.uncompressed_length == -1) {
-      start_uncompressed_data(input_file_pos);
+  // uncompressed data
+  g_pzpipe.fout->put(0);
+
+  for (;;) {
+    g_pzpipe.fin->read(reinterpret_cast<char*>(copybuf), COPY_BUF_SIZE);
+    bytes_read = g_pzpipe.fin->gcount();
+    if (bytes_read > -1) g_pzpipe.fout->write(reinterpret_cast<char*>(copybuf), bytes_read);
+    if (bytes_read < COPY_BUF_SIZE) {
+      break;
     }
-    g_pzpipe.uncompressed_length++;
-    g_pzpipe.uncompressed_bytes_total++;
-  }
 
-  end_uncompressed_data(g_pzpipe.fin->tellg());
+    input_file_pos = g_pzpipe.fin->tellg();
+    print_work_sign(true);
+    if (!DEBUG_MODE) {
+      float percent = (input_file_pos / (float)g_pzpipe.fin_length) * 100;
+      show_progress(percent, true, true);
+    }
+  }
 
   denit_compress();
 
   return true;
-}
-
-long long fin_fget_vlint() {
-    unsigned char c;
-    long long v = 0, o = 0, s = 0;
-    while ((c = g_pzpipe.fin->get()) >= 128) {
-        v += (((long long)(c & 127)) << s);
-        s += 7;
-        o = (o + 1) << 7;
-    }
-    return v + o + (((long long)c) << s);
 }
 
 void decompress_file() {
@@ -574,30 +487,26 @@ void decompress_file() {
 
   long long fin_pos = g_pzpipe.fin->tellg();
 
-  while (g_pzpipe.fin->good()) {
-    if (!DEBUG_MODE) {
-      float percent = (fin_pos / (float)g_pzpipe.fin_length) * 100;
-      show_progress(percent, true, true);
+  if (!DEBUG_MODE) {
+    float percent = (fin_pos / (float)g_pzpipe.fin_length) * 100;
+    show_progress(percent, true, true);
+  }
+
+  unsigned char header1 = g_pzpipe.fin->get();
+  if (header1 == 0) { // uncompressed data
+    int chr = 0;
+    int next_char = g_pzpipe.fin->get();
+    while (g_pzpipe.fin->good()) {
+      chr = next_char;
+      // This is a hack fix, for some reason we are adding a Zeroed byte at the end of the original stream while compressing.
+      // The actual fix is to find out why that is happening and make it no longer happen, for now I just want this to work so if the next chr is EOF
+      // I know we are currently at the last byte of actual data, which is that extra Zeroed byte, so I just drop it and end writing output at that point.
+      next_char = g_pzpipe.fin->get();
+      if (next_char == EOF) break;
+      g_pzpipe.fout->put(chr);
+      fin_pos += 1;
+      if (fin_pos >= g_pzpipe.fin_length) fin_pos = g_pzpipe.fin_length - 1;
     }
-
-    unsigned char header1 = g_pzpipe.fin->get();
-    if (!g_pzpipe.fin->good()) break;
-    if (header1 == 0) { // uncompressed data
-      long long uncompressed_data_length;
-      uncompressed_data_length = fin_fget_vlint();
-
-      if (uncompressed_data_length == 0) break; // end of PCF file, used by bZip2 compress-on-the-fly
-
-      if (DEBUG_MODE) {
-          std::cout << "Uncompressed data, length=" << uncompressed_data_length << std::endl;
-      }
-
-      fast_copy(*g_pzpipe.fin, *g_pzpipe.fout, uncompressed_data_length, fin_pos);
-    }
-
-    fin_pos = g_pzpipe.fin->tellg();
-    if (g_pzpipe.fin->eof()) break;
-    if (fin_pos >= g_pzpipe.fin_length) fin_pos = g_pzpipe.fin_length - 1;
   }
 
   denit_decompress();
